@@ -2828,7 +2828,7 @@ void gc_mark_and_steal(jl_ptls_t ptls)
 #define GC_CHUNK_MARK_WORK          (1 << 10)
 #define GC_MARK_WORK_TO_N_THREADS   (1 << 3)
 
-int64_t gc_estimate_mark_work_in_queue(jl_ptls_t ptls)
+int64_t gc_estimate_mark_work_in_queue(jl_ptls_t ptls) JL_NOTSAFEPOINT
 {
     int64_t work = 0;
     work += (jl_atomic_load_relaxed(&ptls->mark_queue.ptr_queue.bottom) -
@@ -2838,7 +2838,7 @@ int64_t gc_estimate_mark_work_in_queue(jl_ptls_t ptls)
     return work;
 }
 
-int64_t gc_estimate_mark_work(void)
+int64_t gc_estimate_mark_work(void) JL_NOTSAFEPOINT
 {
     int64_t work = 0;
     for (int i = gc_first_tid; i < gc_first_tid + jl_n_markthreads; i++) {
