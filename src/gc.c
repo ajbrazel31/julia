@@ -2824,9 +2824,9 @@ void gc_mark_and_steal(jl_ptls_t ptls)
     }
 }
 
-#define GC_PTR_MARK_WORK            (1)
-#define GC_CHUNK_MARK_WORK          (1 << 10)
-#define GC_MARK_WORK_TO_N_THREADS   (1 << 3)
+#define GC_PTR_MARK_WORK                (1)
+#define GC_CHUNK_MARK_WORK              (1 << 10)
+#define GC_MIN_MARK_WORK_PER_THREAD     (1 << 3)
 
 int64_t gc_estimate_mark_work_in_queue(jl_ptls_t ptls) JL_NOTSAFEPOINT
 {
@@ -2868,15 +2868,16 @@ void gc_mark_loop_parallel(jl_ptls_t ptls, int master)
     }
     while (1) {
         uv_mutex_lock(&gc_mark_loop_gate_lock);
-        loop : {
+        count_work : {
             int n_threads_marking = jl_atomic_load(&gc_n_threads_marking);
             if (n_threads_marking == 0) {
                 uv_mutex_unlock(&gc_mark_loop_gate_lock);
                 break;
             }
             int64_t work = gc_estimate_mark_work();
-            if (work <= n_threads_marking * GC_MARK_WORK_TO_N_THREADS) {
-                goto loop;
+            if (work <= n_threads_marking * GC_MIN_MARK_WORK_PER_THREAD) {
+                jl_cpu_pause();
+                goto count_work;
             }
         }
         // Try to become a thief while other threads are marking
