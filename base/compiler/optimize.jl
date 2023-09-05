@@ -530,8 +530,20 @@ mutable struct PostOptAnalysisState
     all_nothrow::Bool
     all_noub::Bool
     any_conditional_ub::Bool
-    had_trycatch::Bool
-    PostOptAnalysisState() = new(true, true, true, true, false, false)
+    PostOptAnalysisState() = new(true, true, true, true, false)
+end
+give_up_refinements!(sv::PostOptAnalysisState) =
+    sv.all_retpaths_consistent = sv.all_effect_free = sv.all_nothrow = sv.all_noub = false
+any_refinable(sv::PostOptAnalysisState) =
+    sv.all_retpaths_consistent | sv.all_effect_free | sv.all_nothrow | sv.all_noub
+
+function refine_effects!(result::InferenceResult, sv::PostOptAnalysisState)
+    effects = result.ipo_effects
+    return result.ipo_effects = Effects(effects;
+        consistent = sv.all_retpaths_consistent ? ALWAYS_TRUE : effects.consistent,
+        effect_free = sv.all_effect_free ? ALWAYS_TRUE : effects.effect_free,
+        nothrow = sv.all_nothrow ? true : effects.nothrow,
+        noub = sv.all_noub ? (sv.any_conditional_ub ? NOUB_IF_NOINBOUNDS : ALWAYS_TRUE) : effects.noub)
 end
 
 function is_ipo_dataflow_analysis_profitable(effects::Effects)
@@ -619,56 +631,59 @@ function ipo_dataflow_analysis!(interp::AbstractInterpreter, ir::IRCode, result:
 
         if isexpr(stmt, :enter)
             # try/catch not yet modeled
-            sv.had_trycatch = true
+            give_up_refinements!(sv)
             return nothing
         end
 
         scan_non_dataflow_flags!(inst)
-        stmt_inconsistent = scan_inconsistency!(inst, idx)
 
-        if idx == lstmt
-            if isa(stmt, ReturnNode) && isdefined(stmt, :val) && stmt_inconsistent
+        scan_inconsistency!(inst, idx) || return true
+
+        idx == lstmt || return true
+
+        if isa(stmt, ReturnNode) && isdefined(stmt, :val)
+            sv.all_retpaths_consistent = false
+        elseif isa(stmt, GotoIfNot)
+            # Conditional Branch with inconsistent condition.
+            # If we do not know this function terminates, taint consistency, now,
+            # :consistent requires consistent termination. TODO: Just look at the
+            # inconsistent region.
+            if !result.ipo_effects.terminates
                 sv.all_retpaths_consistent = false
-            elseif isa(stmt, GotoIfNot) && stmt_inconsistent
-                # Conditional Branch with inconsistent condition.
-                # If we do not know this function terminates, taint consistency, now,
-                # :consistent requires consistent termination. TODO: Just look at the
-                # inconsistent region.
-                if !result.ipo_effects.terminates
-                    sv.all_retpaths_consistent = false
-                    # Check if there are potential throws that require
-                elseif conditional_successors_may_throw(lazypostdomtree, ir, bb)
-                    sv.all_retpaths_consistent = false
-                else
-                    (; cfg, domtree) = get!(lazyagdomtree)
-                    for succ in iterated_dominance_frontier(cfg, BlockLiveness(ir.cfg.blocks[bb].succs, nothing), domtree)
-                        if succ == length(cfg.blocks)
-                            # Phi node in the virtual exit -> We have a conditional
-                            # return. TODO: Check if all the retvals are egal.
-                            sv.all_retpaths_consistent = false
-                        else
-                            visit_bb_phis!(ir, succ) do phiidx::Int
-                                push!(inconsistent, phiidx)
-                            end
+                # Check if there are potential throws that require
+            elseif conditional_successors_may_throw(lazypostdomtree, ir, bb)
+                sv.all_retpaths_consistent = false
+            else
+                (; cfg, domtree) = get!(lazyagdomtree)
+                for succ in iterated_dominance_frontier(cfg, BlockLiveness(ir.cfg.blocks[bb].succs, nothing), domtree)
+                    if succ == length(cfg.blocks)
+                        # Phi node in the virtual exit -> We have a conditional
+                        # return. TODO: Check if all the retvals are egal.
+                        sv.all_retpaths_consistent = false
+                    else
+                        visit_bb_phis!(ir, succ) do phiidx::Int
+                            push!(inconsistent, phiidx)
                         end
                     end
                 end
             end
         end
 
+        # bail out early if there are no possibilities to refine the effects
+        any_refinable(sv) || return nothing
+
         return true
     end
 
     completed_scan = scan!(scan_stmt!, scanner, true)
 
-    effects = result.ipo_effects
-    if completed_scan
-        sv.had_trycatch && return effects
-    else
+    if !completed_scan
         if !sv.all_retpaths_consistent
             # No longer any dataflow concerns, just scan the flags
             scan!(scanner, false) do inst::Instruction, idx::Int, lstmt::Int, bb::Int
                 scan_non_dataflow_flags!(inst)
+                # bail out early if there are no possibilities to refine the effects
+                any_refinable(sv) || return nothing
                 return true
             end
         else
@@ -718,11 +733,7 @@ function ipo_dataflow_analysis!(interp::AbstractInterpreter, ir::IRCode, result:
         end
     end
 
-    return result.ipo_effects = Effects(effects;
-        consistent = sv.all_retpaths_consistent ? ALWAYS_TRUE : effects.consistent,
-        effect_free = sv.all_effect_free ? ALWAYS_TRUE : effects.effect_free,
-        nothrow = sv.all_nothrow ? true : effects.nothrow,
-        noub = sv.all_noub ? (sv.any_conditional_ub ? NOUB_IF_NOINBOUNDS : ALWAYS_TRUE) : effects.noub)
+    return refine_effects!(result, sv)
 end
 
 # run the optimization work
